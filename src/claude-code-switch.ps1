@@ -42,7 +42,7 @@ foreach ($c in ($cfgCandidates | Where-Object { Test-Path $_ } | Get-Item -EA Si
     try { if ((Get-Content $c.FullName -Raw) -match '"oauthAccount"') { $cfg = $c.FullName; break } } catch {}
 }
 if (-not $cfg) { $cfg = $cfgCandidates[0] }
-$RawBase = 'https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main'
+$RawBase = 'https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main'
 
 # Replace a top-level object value with raw JSON text, brace-balanced and
 # string-aware, leaving the rest of the file byte-for-byte unchanged. Used to

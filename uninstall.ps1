@@ -2,7 +2,7 @@
     Claude Account Switcher - uninstaller
 
     One-line uninstall:
-      irm https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main/uninstall.ps1 | iex
+      irm https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main/uninstall.ps1 | iex
 
     Removes the scripts, the Desktop shortcut, and the added functions from your
     PowerShell profiles. Does NOT touch your saved accounts (~/.claude-accounts)

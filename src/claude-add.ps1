@@ -14,28 +14,58 @@ Write-Host "1. Log into the account you want to save in the Claude desktop app."
 Write-Host "2. Then run this - it CLOSES Claude to copy its session, then reopens it." -ForegroundColor DarkGray
 Write-Host ""
 
-# -- Resolve the live session root (handles MSIX/Store + plain installs) --------
+# -- Resolve the live session root ------------------------------------------------
+# Current Claude desktop builds keep the Electron profile in
+# %LOCALAPPDATA%\Claude-Data\claude_<package-family>. The old MSIX
+# Roaming\Claude directory is left behind with only a .user-data-left.* marker,
+# so a directory that merely exists is not a session. Older builds still use
+# %APPDATA%\Claude or the MSIX Roaming folder when those hold a real profile.
+function Test-ProfileSession($root) {
+    if (-not $root -or -not (Test-Path -LiteralPath $root)) { return $false }
+    $cookies = Join-Path $root 'Network\Cookies'
+    $config  = Join-Path $root 'config.json'
+    if (-not (Test-Path -LiteralPath $cookies) -or -not (Test-Path -LiteralPath $config)) { return $false }
+    if ((Get-Item -LiteralPath $cookies).Length -le 0) { return $false }
+    return $true
+}
+
 function Get-SessionRoot {
-    $roots = @( Join-Path $env:APPDATA 'Claude' )
+    $roots = @()
+    $dataRoot = Join-Path $env:LOCALAPPDATA 'Claude-Data'
+    if (Test-Path -LiteralPath $dataRoot) {
+        Get-ChildItem -LiteralPath $dataRoot -Directory -Filter 'claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
+            $roots += $_.FullName
+        }
+    }
+    $roots += (Join-Path $env:APPDATA 'Claude')
     $pkgRoot = Join-Path $env:LOCALAPPDATA 'Packages'
-    if (Test-Path $pkgRoot) {
-        Get-ChildItem $pkgRoot -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
+    if (Test-Path -LiteralPath $pkgRoot) {
+        Get-ChildItem -LiteralPath $pkgRoot -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
             $roots += (Join-Path $_.FullName 'LocalCache\Roaming\Claude')
         }
     }
-    $roots = $roots | Where-Object { Test-Path $_ } | Select-Object -Unique
-    $live = $null; $newest = $null; $newestTime = [datetime]::MinValue
-    foreach ($r in $roots) {
-        $ck = Join-Path $r 'Network\Cookies'
-        if (Test-Path $ck) {
-            try { $fs = [IO.File]::Open($ck,'Open','Read','None'); $fs.Close() } catch { $live = $r }
-            $t = (Get-Item $ck).LastWriteTime
-            if ($t -gt $newestTime) { $newestTime = $t; $newest = $r }
+
+    $usable = @()
+    foreach ($r in ($roots | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique)) {
+        if (-not (Test-ProfileSession $r)) { continue }
+        $cookies = Join-Path $r 'Network\Cookies'
+        $locked = $false
+        try {
+            $fs = [IO.File]::Open($cookies, 'Open', 'Read', 'None')
+            $fs.Close()
+        } catch { $locked = $true }
+        $usable += [pscustomobject]@{
+            Root   = $r
+            Locked = $locked
+            Time   = (Get-Item -LiteralPath $cookies).LastWriteTime
         }
     }
-    if ($live)   { return $live }
-    if ($newest) { return $newest }
-    return ($roots | Select-Object -First 1)
+    $pick = $usable | Where-Object { $_.Locked } | Sort-Object Time -Descending | Select-Object -First 1
+    if (-not $pick) {
+        $pick = $usable | Sort-Object Time -Descending | Select-Object -First 1
+    }
+    if ($pick) { return $pick.Root }
+    return $null
 }
 
 function Stop-Claude($root) {
@@ -207,7 +237,9 @@ function Get-LoggedInEmail($root) {
 $root = Get-SessionRoot
 if (-not $root) {
     Write-Host "Claude app data not found. Open Claude, log in, then retry." -ForegroundColor Red
-    Start-Sleep -Seconds 3; return
+    Write-Host "A usable profile has config.json and Network\Cookies under %LOCALAPPDATA%\Claude-Data\claude_* ." -ForegroundColor Red
+    Write-Host "The old MSIX Roaming\Claude folder is ignored when it only has a .user-data-left marker." -ForegroundColor Red
+    Start-Sleep -Seconds 4; return
 }
 
 $detected = Get-LoggedInEmail $root
@@ -245,11 +277,33 @@ $dest        = Join-Path $store $safe
 $profileDest = Join-Path $dest 'profile'
 
 Write-Host "Saving complete profile for $email ..." -ForegroundColor Cyan
-if (-not (Copy-ClaudeProfile $root $profileDest)) {
-    Write-Host "Could not save the complete Claude profile. No account was changed." -ForegroundColor Red
+if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Force -Path $dest | Out-Null }
+$staging  = Join-Path $dest '.profile-staging'
+$previous = Join-Path $dest '.profile-previous'
+if (Test-Path $staging)  { Remove-Item $staging  -Recurse -Force }
+if (Test-Path $previous) { Remove-Item $previous -Recurse -Force }
+if (-not (Copy-ClaudeProfile $root $staging) -or -not (Test-ProfileSession $staging)) {
+    if (Test-Path $staging) { Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue }
+    Write-Host "Refusing to save: the snapshot has no config.json or cookies. No account was changed." -ForegroundColor Red
+    Start-Claude
+    Start-Sleep -Seconds 4; return
+}
+$movedAside = $false
+if (Test-Path $profileDest) {
+    Move-Item $profileDest $previous
+    $movedAside = $true
+}
+try {
+    Move-Item $staging $profileDest
+} catch {
+    if ($movedAside -and (Test-Path $previous) -and -not (Test-Path $profileDest)) {
+        Move-Item $previous $profileDest
+    }
+    Write-Host "Could not store the snapshot. The previous snapshot was left in place." -ForegroundColor Red
     Start-Claude
     Start-Sleep -Seconds 3; return
 }
+if (Test-Path $previous) { Remove-Item $previous -Recurse -Force }
 
 [ordered]@{ email = $email; savedAt = (Get-Date -Format o); sourceRoot = $root; profileFormat = 2 } |
     ConvertTo-Json | Set-Content -Path (Join-Path $dest 'meta.json') -Encoding UTF8

@@ -25,7 +25,7 @@ Neither app has a built-in account switcher — this adds both. **No npm require
 
 ```powershell
 # 1. Install (run once)
-irm https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main/install.ps1 | iex
 # 2. Open a NEW PowerShell window, then save each account (see "Add your accounts")
 claude-add-account
 # 3. Switch any time
@@ -36,7 +36,7 @@ claude-switch-account
 
 ```bash
 # 1. Install (run once)
-pwsh -c "irm https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main/install.ps1 | iex"
+pwsh -c "irm https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main/install.ps1 | iex"
 # 2. Reload your shell (or open a new terminal), then save each account
 source ~/.zshrc   # or ~/.bashrc on Linux
 claude-code-add
@@ -59,7 +59,7 @@ claude-code-switch
 Open **PowerShell** and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main/install.ps1 | iex
 ```
 
 This installs:
@@ -186,7 +186,13 @@ session level:
   `~/.claude-accounts/.backup-<timestamp>/profile/` (keeps the last backup),
   restores the chosen complete profile, and restarts the app.
 
-It auto-detects the Store/MSIX app location, so it survives Claude updates.
+It follows the live Electron profile. Current Claude desktop builds store that in
+`%LOCALAPPDATA%\Claude-Data\claude_<package-family>` and leave the old MSIX
+`Roaming\Claude` folder behind with only a `.user-data-left.*` marker. The
+switcher uses the folder that actually contains `config.json` and
+`Network\Cookies`, and still accepts the older `%APPDATA%\Claude` and MSIX
+locations when those hold a real session. A snapshot missing either file is
+refused on save and left out of the switch menu.
 
 There is no live in-app switch — the menu is the "dropdown", and the app reflects
 whichever account's session is active after the restart.
@@ -205,7 +211,7 @@ whichever account's session is active after the restart.
 ## Uninstall
 
 ```powershell
-irm https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main/uninstall.ps1 | iex
 ```
 
 Removes the scripts, shortcut, and functions. Leaves your saved accounts alone;

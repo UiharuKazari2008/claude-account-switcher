@@ -7,7 +7,7 @@
 # app (and any session running inside it).
 
 $store          = Join-Path $env:USERPROFILE '.claude-accounts'
-$RawBase        = 'https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main'
+$RawBase        = 'https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main'
 
 # -- Update check (best-effort, cached once per day) ---------------------------
 function Test-ForUpdate {
@@ -28,28 +28,58 @@ function Test-ForUpdate {
     } catch {}
 }
 
-# -- Resolve the live session root (handles MSIX/Store + plain installs) --------
+# -- Resolve the live session root ------------------------------------------------
+# Current Claude desktop builds keep the Electron profile in
+# %LOCALAPPDATA%\Claude-Data\claude_<package-family>. The old MSIX
+# Roaming\Claude directory is left behind with only a .user-data-left.* marker,
+# so a directory that merely exists is not a session. Older builds still use
+# %APPDATA%\Claude or the MSIX Roaming folder when those hold a real profile.
+function Test-ProfileSession($root) {
+    if (-not $root -or -not (Test-Path -LiteralPath $root)) { return $false }
+    $cookies = Join-Path $root 'Network\Cookies'
+    $config  = Join-Path $root 'config.json'
+    if (-not (Test-Path -LiteralPath $cookies) -or -not (Test-Path -LiteralPath $config)) { return $false }
+    if ((Get-Item -LiteralPath $cookies).Length -le 0) { return $false }
+    return $true
+}
+
 function Get-SessionRoot {
-    $roots = @( Join-Path $env:APPDATA 'Claude' )
+    $roots = @()
+    $dataRoot = Join-Path $env:LOCALAPPDATA 'Claude-Data'
+    if (Test-Path -LiteralPath $dataRoot) {
+        Get-ChildItem -LiteralPath $dataRoot -Directory -Filter 'claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
+            $roots += $_.FullName
+        }
+    }
+    $roots += (Join-Path $env:APPDATA 'Claude')
     $pkgRoot = Join-Path $env:LOCALAPPDATA 'Packages'
-    if (Test-Path $pkgRoot) {
-        Get-ChildItem $pkgRoot -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
+    if (Test-Path -LiteralPath $pkgRoot) {
+        Get-ChildItem -LiteralPath $pkgRoot -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
             $roots += (Join-Path $_.FullName 'LocalCache\Roaming\Claude')
         }
     }
-    $roots = $roots | Where-Object { Test-Path $_ } | Select-Object -Unique
-    $live = $null; $newest = $null; $newestTime = [datetime]::MinValue
-    foreach ($r in $roots) {
-        $ck = Join-Path $r 'Network\Cookies'
-        if (Test-Path $ck) {
-            try { $fs = [IO.File]::Open($ck,'Open','Read','None'); $fs.Close() } catch { $live = $r }
-            $t = (Get-Item $ck).LastWriteTime
-            if ($t -gt $newestTime) { $newestTime = $t; $newest = $r }
+
+    $usable = @()
+    foreach ($r in ($roots | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique)) {
+        if (-not (Test-ProfileSession $r)) { continue }
+        $cookies = Join-Path $r 'Network\Cookies'
+        $locked = $false
+        try {
+            $fs = [IO.File]::Open($cookies, 'Open', 'Read', 'None')
+            $fs.Close()
+        } catch { $locked = $true }
+        $usable += [pscustomobject]@{
+            Root   = $r
+            Locked = $locked
+            Time   = (Get-Item -LiteralPath $cookies).LastWriteTime
         }
     }
-    if ($live)   { return $live }
-    if ($newest) { return $newest }
-    return ($roots | Select-Object -First 1)
+    $pick = $usable | Where-Object { $_.Locked } | Sort-Object Time -Descending | Select-Object -First 1
+    if (-not $pick) {
+        $pick = $usable | Sort-Object Time -Descending | Select-Object -First 1
+    }
+    if ($pick) { return $pick.Root }
+    return $null
 }
 
 function Stop-Claude($root) {
@@ -274,22 +304,34 @@ if (-not $accounts) {
 
 $list = @()
 $legacyCount = 0
+$incompleteCount = 0
 foreach ($a in $accounts) {
     try { $m = Get-Content (Join-Path $a.FullName 'meta.json') -Raw | ConvertFrom-Json } catch { continue }
     $profile = Join-Path $a.FullName 'profile'
     if (-not (Test-Path $profile)) { $legacyCount++; continue }
+    # A snapshot of the abandoned MSIX folder has neither file. Leave it out of
+    # the menu instead of offering an account that cannot sign in.
+    if (-not (Test-ProfileSession $profile)) { $incompleteCount++; continue }
     $tc = $null
     $tc = Get-TokenCacheBlob $profile
     $list += [pscustomobject]@{ Email = $m.email; Dir = $a.FullName; Profile = $profile; Token = $tc }
 }
 if (-not $list) {
+    if ($incompleteCount) {
+        Write-Host "Saved snapshots are missing config.json or cookies, so they were left out of the menu." -ForegroundColor Yellow
+        Write-Host "Sign in, then run claude-add-account again to snapshot %LOCALAPPDATA%\Claude-Data." -ForegroundColor Yellow
+    }
     if ($legacyCount) {
         Write-Host "Your saved desktop accounts use the retired partial-session format." -ForegroundColor Yellow
         Write-Host "Sign in to each account once, then run claude-add-account to create complete-profile snapshots." -ForegroundColor Yellow
-    } else {
+    }
+    if (-not $incompleteCount -and -not $legacyCount) {
         Write-Host "No usable Claude accounts were found. Run claude-add-account after signing in." -ForegroundColor Yellow
     }
     Start-Sleep -Seconds 4; return
+}
+if ($incompleteCount) {
+    Write-Host "Skipped $incompleteCount saved snapshot(s) with no config.json or cookies." -ForegroundColor Yellow
 }
 
 # -- Display picker ------------------------------------------------------------
@@ -333,9 +375,17 @@ if ($pick -notmatch '^\d+$' -or [int]$pick -lt 1 -or [int]$pick -gt $list.Count)
     Write-Host "Invalid choice." -ForegroundColor Red; Start-Sleep -Seconds 2; return
 }
 $chosen      = $list[[int]$pick - 1]
+if (-not (Test-ProfileSession $chosen.Profile)) {
+    Write-Host "That snapshot has no config.json or cookies, so it was not applied." -ForegroundColor Red
+    Start-Sleep -Seconds 3; return
+}
 # -- Perform the swap ----------------------------------------------------------
 $root = Get-SessionRoot
-if (-not $root) { Write-Host "Claude app data not found." -ForegroundColor Red; Start-Sleep -Seconds 2; return }
+if (-not $root) {
+    Write-Host "Claude app data not found." -ForegroundColor Red
+    Write-Host "Expected config.json and Network\Cookies under %LOCALAPPDATA%\Claude-Data\claude_* ." -ForegroundColor Red
+    Start-Sleep -Seconds 3; return
+}
 
 Write-Host ""
 Write-Host "Closing Claude..." -ForegroundColor Cyan
@@ -346,9 +396,11 @@ if (-not (Stop-Claude $root)) {
 
 # Back up the complete live profile so a bad swap is recoverable.
 $backup = Join-Path $store ('.backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$backupProfile = Join-Path $backup 'profile'
 Write-Host "Backing up current profile..." -ForegroundColor DarkGray
-if (-not (Copy-ClaudeProfile $root (Join-Path $backup 'profile'))) {
-    Write-Host "Could not back up the current profile. Refusing to switch." -ForegroundColor Red
+if (-not (Copy-ClaudeProfile $root $backupProfile) -or -not (Test-ProfileSession $backupProfile)) {
+    if (Test-Path $backup) { Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue }
+    Write-Host "Could not back up a complete profile (config.json and cookies). Refusing to switch." -ForegroundColor Red
     Start-Claude
     Start-Sleep -Seconds 3; return
 }
@@ -362,7 +414,7 @@ Get-ChildItem $store -Directory -Filter '.backup-*' -ErrorAction SilentlyContinu
 # every authentication component consistent as Claude changes its storage.
 if ($currentAcct) {
     Write-Host "Refreshing saved profile for $($currentAcct.Email)..." -ForegroundColor DarkGray
-    if (-not (Copy-ClaudeProfile $root $currentAcct.Profile)) {
+    if (-not (Copy-ClaudeProfile $root $currentAcct.Profile) -or -not (Test-ProfileSession $currentAcct.Profile)) {
         Write-Host "Could not refresh the current profile. Refusing to switch." -ForegroundColor Red
         Start-Claude
         Start-Sleep -Seconds 3; return
@@ -370,8 +422,13 @@ if ($currentAcct) {
 }
 
 Write-Host "Loading complete profile for $($chosen.Email)..." -ForegroundColor Cyan
-if (-not (Copy-ClaudeProfile $chosen.Profile $root)) {
-    Write-Host "Could not load the selected profile. Restore the backup at $backup if needed." -ForegroundColor Red
+if (-not (Copy-ClaudeProfile $chosen.Profile $root) -or -not (Test-ProfileSession $root)) {
+    Write-Host "Selected snapshot did not restore config.json and cookies. Restoring the backup." -ForegroundColor Red
+    $restored = (Copy-ClaudeProfile $backupProfile $root) -and (Test-ProfileSession $root)
+    if (-not $restored) {
+        Write-Host "Could not restore the backup at $backup. Copy that profile back by hand if Claude asks you to sign in." -ForegroundColor Red
+    }
+    Start-Claude
     Start-Sleep -Seconds 3; return
 }
 

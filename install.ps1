@@ -3,9 +3,9 @@
 
     One-line install:
       Windows (PowerShell):
-        irm https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main/install.ps1 | iex
+        irm https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main/install.ps1 | iex
       macOS / Linux (needs PowerShell - https://aka.ms/powershell):
-        pwsh -c "irm https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main/install.ps1 | iex"
+        pwsh -c "irm https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main/install.ps1 | iex"
 
     Installs (Windows):
       - ~/.claude-tools/*.ps1 (desktop + Claude Code switchers)
@@ -22,7 +22,7 @@
     No npm required - it works directly on Claude's credentials.
 #>
 
-$RawBase     = 'https://raw.githubusercontent.com/karthiknl0/claude-account-switcher/main'
+$RawBase     = 'https://raw.githubusercontent.com/UiharuKazari2008/claude-account-switcher/main'
 $ToolsDir    = Join-Path $HOME '.claude-tools'
 $SwitchPath  = Join-Path $ToolsDir 'claude-switch.ps1'
 $AddPath     = Join-Path $ToolsDir 'claude-add.ps1'
@@ -39,27 +39,49 @@ if (Test-Path variable:IsMacOS)   { $PlatformMac = $IsMacOS }
 Write-Host ""
 Write-Host "=== Claude Account Switcher - installer ===" -ForegroundColor Cyan
 
+# Running this file from a checkout installs that checkout. `irm | iex` has no
+# script path, so it downloads from $RawBase instead.
+$LocalRoot = $PSScriptRoot
+if (-not $LocalRoot -and $PSCommandPath) { $LocalRoot = Split-Path -Parent $PSCommandPath }
+$UseLocal = $false
+if ($LocalRoot -and (Test-Path (Join-Path $LocalRoot 'src\claude-switch.ps1')) -and (Test-Path (Join-Path $LocalRoot 'VERSION'))) {
+    $UseLocal = $true
+}
+
+function Save-ToolScript([string]$Name, [string]$Dest) {
+    if ($UseLocal) {
+        Copy-Item -LiteralPath (Join-Path $LocalRoot "src\$Name") -Destination $Dest -Force
+        return
+    }
+    Invoke-RestMethod -Uri "$RawBase/src/$Name" -OutFile $Dest
+}
+
 # 1. Fetch the scripts (CLI switcher works on every platform; the desktop
 #    switcher is Windows-only).
 Write-Host "[1/3] Installing scripts to $ToolsDir ..." -ForegroundColor Cyan
+if ($UseLocal) { Write-Host "      Source: $LocalRoot" -ForegroundColor DarkGray }
 New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
 try {
-    Invoke-RestMethod -Uri "$RawBase/src/claude-code-switch.ps1" -OutFile $CcSwitchPath
-    Invoke-RestMethod -Uri "$RawBase/src/claude-code-add.ps1"    -OutFile $CcAddPath
-    Invoke-RestMethod -Uri "$RawBase/src/claude-code-doctor.ps1" -OutFile $CcDoctorPath
+    Save-ToolScript 'claude-code-switch.ps1' $CcSwitchPath
+    Save-ToolScript 'claude-code-add.ps1'    $CcAddPath
+    Save-ToolScript 'claude-code-doctor.ps1' $CcDoctorPath
     if ($PlatformWin) {
-        Invoke-RestMethod -Uri "$RawBase/src/claude-switch.ps1"  -OutFile $SwitchPath
-        Invoke-RestMethod -Uri "$RawBase/src/claude-add.ps1"     -OutFile $AddPath
+        Save-ToolScript 'claude-switch.ps1' $SwitchPath
+        Save-ToolScript 'claude-add.ps1'    $AddPath
     }
 } catch {
-    Write-Host "ERROR: could not download scripts from GitHub." -ForegroundColor Red
+    Write-Host "ERROR: could not install scripts." -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     return
 }
 
 # Record the installed version (used by the daily update check).
 try {
-    $ver = (Invoke-RestMethod -Uri "$RawBase/VERSION" -TimeoutSec 8).ToString().Trim()
+    if ($UseLocal) {
+        $ver = (Get-Content (Join-Path $LocalRoot 'VERSION') -Raw).Trim()
+    } else {
+        $ver = (Invoke-RestMethod -Uri "$RawBase/VERSION" -TimeoutSec 8).ToString().Trim()
+    }
     Set-Content -Path $VersionPath -Value $ver -Encoding ASCII
     Write-Host "      Installed version $ver" -ForegroundColor DarkGray
 } catch {}
